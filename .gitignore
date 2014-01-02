@@ -18,3 +18,5 @@
 
 # OS X stuff
 .DS_Store
+
+*.png
