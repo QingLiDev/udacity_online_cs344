@@ -6,7 +6,7 @@
 
   A High Definition Range (HDR) image contains a wider variation of intensity
   and color than is allowed by the RGB format with 1 byte per channel that we
-  have used in the previous assignment.  
+  have used in the previous assignment.
 
   To store this extra information we use single precision floating point for
   each channel.  This allows for an extremely wide range of intensity values.
@@ -53,7 +53,7 @@
   Old TV signals used to be transmitted in this way so that black & white
   televisions could display the luminance channel while color televisions would
   display all three of the channels.
-  
+
 
   Tone-mapping
   ============
@@ -80,6 +80,28 @@
 */
 
 #include "utils.h"
+#include <limits>
+
+//__device__ float
+
+__global__ void max_reduce(const float* const d_lum, int num, float* d_max) {
+  extern __shared__ float shared[];
+
+  int tid = threadIdx.x;
+  int gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+  shared[tid] = d_lum[gid];
+  __syncthreads();
+  *d_max = shared[0];
+
+  for (int s = blockDim.x / 2; s > 0; s >>=1) {
+    if (tid < s)
+      shared[tid] = std::max(shared[tid], shared[tid+s]);
+    __syncthreads();
+  }
+  if (tid == 0)
+    atomicMax(d_max, shared[tid]);
+}
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
@@ -99,6 +121,59 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
     4) Perform an exclusive scan (prefix sum) on the histogram to get
        the cumulative distribution of luminance values (this should go in the
        incoming d_cdf pointer which already has been allocated for you)       */
+  std::cout << "numRows = " << numRows << ", numCols = " << numCols << std::endl;
+  const dim3 blkDim(numCols, 1, 1);
+  const dim3 grdDim(numRows, 1, 1);
+
+  float *d_max, *d_min;
+  size_t fsize = sizeof(float);
+  checkCudaErrors(cudaMalloc(&d_max, fsize));
+  checkCudaErrors(cudaMalloc(&d_min, fsize));
+
+  int numEle = numRows * numCols;
+  // launch cuda kernel max_min_reduce
+  max_reduce<<<blkDim, grdDim, fsize*numCols>>>(d_logLuminance, numEle, d_max);
+  std::cout << d_max[0] << std::endl;
+
+}
 
 
+void referenceCalculation(const float* const h_logLuminance, unsigned int* const h_cdf,
+                          const size_t numRows, const size_t numCols, const size_t numBins)
+{
+  float logLumMin = h_logLuminance[0];
+  float logLumMax = h_logLuminance[0];
+
+  //Step 1
+  //first we find the minimum and maximum across the entire image
+  for (size_t i = 1; i < numCols * numRows; ++i) {
+    logLumMin = min(h_logLuminance[i], logLumMin);
+    logLumMax = max(h_logLuminance[i], logLumMax);
+  }
+
+  //Step 2
+  float logLumRange = logLumMax - logLumMin;
+
+  //Step 3
+  //next we use the now known range to compute
+  //a histogram of numBins bins
+  unsigned int *histo = new unsigned int[numBins];
+
+  for (size_t i = 0; i < numBins; ++i) histo[i] = 0;
+
+  for (size_t i = 0; i < numCols * numRows; ++i) {
+    unsigned int bin = min(static_cast<unsigned int>(numBins - 1),
+                           static_cast<unsigned int>((h_logLuminance[i] - logLumMin) / logLumRange * numBins));
+    histo[bin]++;
+  }
+
+  //Step 4
+  //finally we perform and exclusive scan (prefix sum)
+  //on the histogram to get the cumulative distribution
+  h_cdf[0] = 0;
+  for (size_t i = 1; i < numBins; ++i) {
+    h_cdf[i] = h_cdf[i - 1] + histo[i - 1];
+  }
+
+  delete[] histo;
 }
