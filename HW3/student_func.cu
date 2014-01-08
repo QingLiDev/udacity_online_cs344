@@ -82,7 +82,15 @@
 #include "utils.h"
 #include <limits>
 
-//__device__ float
+__device__ float atomicMaxFloat(float* addr, float val) {
+  int *addrAsInt = (int *)addr;
+  int old = *addrAsInt;
+  while(val > __int_as_float(old)) {
+    old = atomicCAS(addrAsInt, old, __float_as_int(val));
+  }
+
+  return __int_as_float(old);
+}
 
 __global__ void max_reduce(const float* const d_lum, int num, float* d_max) {
   extern __shared__ float shared[];
@@ -100,7 +108,7 @@ __global__ void max_reduce(const float* const d_lum, int num, float* d_max) {
     __syncthreads();
   }
   if (tid == 0)
-    atomicMax(d_max, shared[tid]);
+    atomicMaxFloat(d_max, shared[tid]);
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
