@@ -99,8 +99,6 @@ __global__ void scanA(unsigned int *d_in, unsigned int *d_out,
             tmpA[pout*n+tid] += tmpA[pin*n+tid - offset];
     }
 
-    // __syncthreads();
-
     d_out[gid] = tmpA[pout*n+tid];
     __syncthreads();
 
@@ -122,12 +120,6 @@ __global__ void scanB(unsigned int *d_in, int i)
     int pout = 0;
     int pin = 1;
 
-    // if(tid == 0 && i == 2) {
-    //   for (int i = 0; i < n; i++)
-    //     printf("%d ", d_in[i]);
-    //   printf("\n");
-    // }
-
     tmpB[pout*n + tid] = (tid > 0) ? d_in[tid-1] : 0;
 
     for (int offset = 1; offset < n; offset <<= 1)
@@ -146,12 +138,6 @@ __global__ void scanB(unsigned int *d_in, int i)
 
     d_in[tid] = tmpB[pout*n+tid];
 
-    // __syncthreads();
-    // if(tid == 0) {
-    //   for (int i = 0; i < n; i++)
-    //     printf("%d ", d_in[i]);
-    //   printf("\n");
-    // }
 }
 
 __global__ void movePos(unsigned int *d_valSrc, unsigned int *d_posSrc,
@@ -187,14 +173,13 @@ void your_sort(unsigned int* const d_inputVals,
 {
   //TODO
   //PUT YOUR SORT HERE
-  std::cout << "numElems = " << numElems << std::endl;
+  // std::cout << "numElems = " << numElems << std::endl;
 
   const int nBins = 2;
   const dim3 blkDim(512, 1, 1);
   const dim3 grdDim(ceil(numElems/(double)blkDim.x), 1, 1);
-  cout << "blkDim.x=" << blkDim.x << "\tgrdDim.x=" << grdDim.x << endl;
+  // cout << "blkDim.x=" << blkDim.x << "\tgrdDim.x=" << grdDim.x << endl;
 
-  unsigned int *h_oneBefore = new unsigned int[numElems];
   unsigned int *d_histo, *d_scan, *d_oneBefore, *d_blkSum;
   size_t bin_size = nBins * sizeof(unsigned int);
   size_t ele_size = numElems * sizeof(unsigned int);
@@ -229,33 +214,10 @@ void your_sort(unsigned int* const d_inputVals,
     // count d_oneBefore
     scanA<<<grdDim, blkDim, scanA_share>>>(d_valSrc, d_oneBefore, d_blkSum, mask, i, numElems);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    // if (i == 1) {
-    //   checkCudaErrors(cudaMemcpy(h_oneBefore, d_oneBefore, numElems*sizeof(unsigned int), cudaMemcpyDeviceToHost));
-    //   for(int k = 0; k < 1024; k++) cout << h_oneBefore[k] << " ";
-    //   cout << endl;
-    // }
-
     scanB<<<1, 512, scanB_share>>>(d_blkSum, i);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
     calcOneBeforeB<<<grdDim, blkDim>>>(d_oneBefore, d_blkSum, numElems);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
-    checkCudaErrors(cudaMemcpy(h_oneBefore, d_oneBefore, numElems*sizeof(unsigned int), cudaMemcpyDeviceToHost));
-    for(int k = 500; k < 530; k++) cout << h_oneBefore[k] << " ";
-    cout << endl;
-
-    // GpuTimer timer;
-    // timer.Start();
-    // checkCudaErrors(cudaMemset(d_oneBefore, 0, post_size));
-//     calcOneBefore<<<grdDim, blkDim>>>(d_valSrc, d_oneBefore, mask, i, numElems);
-//     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-// checkCudaErrors(cudaMemcpy(h_oneBefore, d_oneBefore, numElems*sizeof(unsigned int), cudaMemcpyDeviceToHost));
-//     for(int k = 500; k < 530; k++) cout << h_oneBefore[k] << " ";
-//     cout << endl;
-//     cout << endl;
-
-    // timer.Stop();
-    // cout << timer.Elapsed() << endl;
 
     // move to the right position
     movePos<<<grdDim, blkDim>>>(d_valSrc, d_posSrc, d_valDst, d_posDst, d_scan, d_oneBefore, mask, i, numElems);
