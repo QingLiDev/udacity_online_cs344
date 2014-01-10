@@ -253,7 +253,7 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   calcHisto<<<grdDim, blkDim>>>(d_histo, d_logLuminance, h_min, llRange, numBins);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-  // step 4
+  // step 4 Attention: numBins is 512 or 1204 at most
   //scan_wrong<<<1, numBins, 2*numBins*sizeof(unsigned int)>>>(d_histo, d_cdf, numBins);
   scan_correct<<<1, numBins, 2*numBins*sizeof(unsigned int)>>>(d_histo, d_cdf, numBins);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
