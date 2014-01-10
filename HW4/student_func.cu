@@ -4,6 +4,7 @@
 #include "utils.h"
 //#include <thrust/host_vector.h>
 #include "timer.h"
+#include <stdio.h>
 
 /* Red Eye Removal
    ===============
@@ -61,6 +62,98 @@ __global__ void calcOneBefore(unsigned int *d_in, unsigned int *d_oneBefore, uns
   }
 }
 
+__global__ void calcOneBeforeB(unsigned int *d_oneBefore, unsigned int *blkSum, int numElems) {
+  //int tid = threadIdx.x;
+  int gid = blockIdx.x * blockDim.x + threadIdx.x;
+  if(gid >= (int)numElems) return;
+  d_oneBefore[gid] += blkSum[blockIdx.x];
+}
+
+__global__ void scanA(unsigned int *d_in, unsigned int *d_out,
+                      unsigned int *d_blkSum, unsigned int mask,
+                      int i, size_t numElems) {
+
+    extern  __shared__  unsigned int tmpA[];
+
+    int tid = threadIdx.x;
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    int n = blockDim.x;
+
+    int bin;
+    if (gid >= (int)numElems || tid == 0) bin = 0;
+    else bin = (d_in[gid-1] & mask) >> i;
+
+    int pout = 0;
+    int pin = 1;
+    tmpA[pout*n + tid] = (tid > 0) ? bin : 0;
+
+    for (int offset = 1; offset < n; offset <<= 1)
+    {
+        pout = 1 - pout;
+        pin  = 1 - pout;
+        __syncthreads();
+
+        tmpA[pout*n+tid] = tmpA[pin*n+tid];
+
+        if (tid >= offset)
+            tmpA[pout*n+tid] += tmpA[pin*n+tid - offset];
+    }
+
+    // __syncthreads();
+
+    d_out[gid] = tmpA[pout*n+tid];
+    __syncthreads();
+
+    if (tid == blockDim.x-1) {
+      int plus = 0;
+      if (gid >= (int)numElems)  plus = 0;
+      else plus = (d_in[gid] & mask) >> i;
+      d_blkSum[blockIdx.x] = tmpA[pout*n + blockDim.x - 1] + plus;
+    }
+}
+
+__global__ void scanB(unsigned int *d_in, int i)
+{
+    extern  __shared__  unsigned int tmpB[];
+
+    int tid = threadIdx.x;
+    int n = blockDim.x;
+
+    int pout = 0;
+    int pin = 1;
+
+    // if(tid == 0 && i == 2) {
+    //   for (int i = 0; i < n; i++)
+    //     printf("%d ", d_in[i]);
+    //   printf("\n");
+    // }
+
+    tmpB[pout*n + tid] = (tid > 0) ? d_in[tid-1] : 0;
+
+    for (int offset = 1; offset < n; offset <<= 1)
+    {
+        pout = 1 - pout;
+        pin  = 1 - pout;
+        __syncthreads();
+
+        tmpB[pout*n+tid] = tmpB[pin*n+tid];
+
+        if (tid >= offset)
+            tmpB[pout*n+tid] += tmpB[pin*n+tid - offset];
+    }
+
+    __syncthreads();
+
+    d_in[tid] = tmpB[pout*n+tid];
+
+    // __syncthreads();
+    // if(tid == 0) {
+    //   for (int i = 0; i < n; i++)
+    //     printf("%d ", d_in[i]);
+    //   printf("\n");
+    // }
+}
+
 __global__ void movePos(unsigned int *d_valSrc, unsigned int *d_posSrc,
                         unsigned int *d_valDst, unsigned int *d_posDst,
                         unsigned int *d_scan, unsigned int *d_oneBefore,
@@ -101,24 +194,30 @@ void your_sort(unsigned int* const d_inputVals,
   const dim3 grdDim(ceil(numElems/(double)blkDim.x), 1, 1);
   cout << "blkDim.x=" << blkDim.x << "\tgrdDim.x=" << grdDim.x << endl;
 
-  //unsigned int *h_oneBefore = new unsigned int[numElems];
-  unsigned int *d_histo, *d_scan, *d_oneBefore;
+  unsigned int *h_oneBefore = new unsigned int[numElems];
+  unsigned int *d_histo, *d_scan, *d_oneBefore, *d_blkSum;
   size_t bin_size = nBins * sizeof(unsigned int);
   size_t ele_size = numElems * sizeof(unsigned int);
+  size_t post_size = blkDim.x * grdDim.x * sizeof(unsigned int);
+  size_t sum_size = 512 * sizeof(unsigned int);
   checkCudaErrors(cudaMalloc(&d_histo, bin_size));
   checkCudaErrors(cudaMalloc(&d_scan, bin_size));
-  checkCudaErrors(cudaMalloc(&d_oneBefore, ele_size));
+  checkCudaErrors(cudaMalloc(&d_oneBefore, post_size));
+  checkCudaErrors(cudaMalloc(&d_blkSum, sum_size));
 
   unsigned int *d_valSrc = d_inputVals;
   unsigned int *d_posSrc = d_inputPos;
   unsigned int *d_valDst = d_outputVals;
   unsigned int *d_posDst = d_outputPos;
 
+  int scanA_share = 2 * blkDim.x * sizeof(unsigned int);
+  int scanB_share = 2 * 512 * sizeof(unsigned int);
   for (size_t i = 0; i < 8 * sizeof(unsigned int); i++) {
     unsigned int mask = 1 << i;
     checkCudaErrors(cudaMemset(d_histo, 0, bin_size));
     checkCudaErrors(cudaMemset(d_scan, 0, bin_size));
-    checkCudaErrors(cudaMemset(d_oneBefore, 0, ele_size));
+    checkCudaErrors(cudaMemset(d_oneBefore, 0, post_size));
+    checkCudaErrors(cudaMemset(d_blkSum, 0, sum_size));
 
     // calculate histogram
     calcHisto<<<grdDim, blkDim>>>(d_histo, d_valSrc, mask, i, numElems);
@@ -128,10 +227,33 @@ void your_sort(unsigned int* const d_inputVals,
     cudaMemcpy(&d_scan[1], d_histo, sizeof(unsigned int), cudaMemcpyDeviceToDevice);
 
     // count d_oneBefore
+    scanA<<<grdDim, blkDim, scanA_share>>>(d_valSrc, d_oneBefore, d_blkSum, mask, i, numElems);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    // if (i == 1) {
+    //   checkCudaErrors(cudaMemcpy(h_oneBefore, d_oneBefore, numElems*sizeof(unsigned int), cudaMemcpyDeviceToHost));
+    //   for(int k = 0; k < 1024; k++) cout << h_oneBefore[k] << " ";
+    //   cout << endl;
+    // }
+
+    scanB<<<1, 512, scanB_share>>>(d_blkSum, i);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    calcOneBeforeB<<<grdDim, blkDim>>>(d_oneBefore, d_blkSum, numElems);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    checkCudaErrors(cudaMemcpy(h_oneBefore, d_oneBefore, numElems*sizeof(unsigned int), cudaMemcpyDeviceToHost));
+    for(int k = 500; k < 530; k++) cout << h_oneBefore[k] << " ";
+    cout << endl;
+
     // GpuTimer timer;
     // timer.Start();
-    calcOneBefore<<<grdDim, blkDim>>>(d_valSrc, d_oneBefore, mask, i, numElems);
-    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    // checkCudaErrors(cudaMemset(d_oneBefore, 0, post_size));
+//     calcOneBefore<<<grdDim, blkDim>>>(d_valSrc, d_oneBefore, mask, i, numElems);
+//     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+// checkCudaErrors(cudaMemcpy(h_oneBefore, d_oneBefore, numElems*sizeof(unsigned int), cudaMemcpyDeviceToHost));
+//     for(int k = 500; k < 530; k++) cout << h_oneBefore[k] << " ";
+//     cout << endl;
+//     cout << endl;
+
     // timer.Stop();
     // cout << timer.Elapsed() << endl;
 
